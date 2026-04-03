@@ -703,7 +703,26 @@ if [ "$INSTALL_CODEX" -eq 1 ]; then
   create_agents_sidecar "$SOURCE_GSTACK_DIR"
 fi
 
-# 8. First-time welcome + legacy cleanup
+# 8. Run pending version migrations
+# Migrations handle state fixes that ./setup alone can't cover (stale config,
+# orphaned files, directory structure changes). Each migration is idempotent.
+MIGRATIONS_DIR="$SOURCE_GSTACK_DIR/gstack-upgrade/migrations"
+CURRENT_VERSION=$(cat "$SOURCE_GSTACK_DIR/VERSION" 2>/dev/null || echo "unknown")
+LAST_SETUP_VERSION=$(cat "$HOME/.gstack/.last-setup-version" 2>/dev/null || echo "0.0.0.0")
+if [ -d "$MIGRATIONS_DIR" ] && [ "$CURRENT_VERSION" != "unknown" ] && [ "$LAST_SETUP_VERSION" != "$CURRENT_VERSION" ]; then
+  for migration in $(find "$MIGRATIONS_DIR" -maxdepth 1 -name 'v*.sh' -type f 2>/dev/null | sort -V); do
+    m_ver="$(basename "$migration" .sh | sed 's/^v//')"
+    # Run if this migration version is newer than last setup version
+    if [ "$(printf '%s\n%s' "$LAST_SETUP_VERSION" "$m_ver" | sort -V | head -1)" = "$LAST_SETUP_VERSION" ] && [ "$LAST_SETUP_VERSION" != "$m_ver" ]; then
+      echo "  running migration $m_ver..."
+      bash "$migration" || echo "  warning: migration $m_ver had errors (non-fatal)"
+    fi
+  done
+fi
+mkdir -p "$HOME/.gstack"
+echo "$CURRENT_VERSION" > "$HOME/.gstack/.last-setup-version"
+
+# 9. First-time welcome + legacy cleanup
 if [ ! -f "$HOME/.gstack/.welcome-seen" ]; then
   echo "  Welcome! Run /gstack-upgrade anytime to stay current."
   touch "$HOME/.gstack/.welcome-seen"
