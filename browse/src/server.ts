@@ -675,6 +675,9 @@ function resetIdleTimer() {
 }
 
 const idleCheckInterval = setInterval(() => {
+  // Headed mode: the user is looking at the browser. Never auto-die.
+  // Only shut down when the user explicitly disconnects or closes the window.
+  if (browserManager.getConnectionMode() === 'headed') return;
   if (Date.now() - lastActivity > IDLE_TIMEOUT_MS) {
     console.log(`[browse] Idle for ${IDLE_TIMEOUT_MS / 1000}s, shutting down`);
     shutdown();
