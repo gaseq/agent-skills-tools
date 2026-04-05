@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.15.9.0] - 2026-04-05 — Multi-Agent Browser Platform
+
+Any AI agent can now share your browser. Pair a remote agent with one command (`$B pair-agent`), and it gets its own tab with scoped access. Tab isolation prevents agents from stepping on each other. Tunnel support via ngrok lets agents connect from anywhere.
+
+### Added
+
+- **Token registry for multi-agent access.** Per-agent scoped tokens with read/write/admin/meta scope categories, domain restrictions, rate limiting (10 req/s default), and 24h expiry. Setup keys for secure pairing (5-min TTL, one-time use). Full lifecycle: create, exchange, revoke, rotate.
+- **Tab isolation.** Each agent owns the tabs it creates. Write commands are blocked on tabs you don't own. Read access is always allowed. The user's pre-existing tabs are root-only. `transferTab()` for handoff between agents.
+- **`$B pair-agent` command.** One command generates a copy-pasteable instruction block with curl commands for the remote agent. Smart tunnel fallback: uses tunnel URL if active, warns if ngrok is configured but not running, falls back to localhost. Flags: `--admin`, `--local HOST`, `--client NAME`.
+- **POST /pair endpoint.** Server-side setup key creation for the pairing ceremony. Returns setup key + tunnel URL in one call.
+- **POST /connect endpoint.** Setup key exchange returns a scoped session token. Rate-limited to 3 attempts/minute. Idempotent: if the tunnel drops mid-exchange, the same key can be re-presented.
+- **ngrok tunnel integration.** `BROWSE_TUNNEL=1` opens an ngrok tunnel after server start. Reads auth from `~/.gstack/ngrok.env`. Supports stable domains via `NGROK_DOMAIN`.
+- **Activity attribution.** Every command in the activity stream now includes `clientId` so you can see which agent did what.
+
 ## [0.15.8.0] - 2026-04-04 — Smarter Reviews
 
 Code reviews now learn from your decisions. Skip a finding once and it stays quiet until the code changes. Specialists auto-suggest test stubs alongside their findings. And silent specialists that never find anything get auto-gated so reviews stay fast.
