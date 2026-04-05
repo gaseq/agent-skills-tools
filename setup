@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # gstack setup — build browser binary + register skills with Claude Code / Codex
 set -e
+umask 077  # Restrict new files to owner-only (0o600 files, 0o700 dirs)
 
 if ! command -v bun >/dev/null 2>&1; then
   echo "Error: bun is required but not installed." >&2

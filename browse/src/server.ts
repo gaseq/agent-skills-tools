@@ -398,10 +398,10 @@ function createSession(): SidebarSession {
     lastActiveAt: new Date().toISOString(),
   };
   const sessionDir = path.join(SESSIONS_DIR, id);
-  fs.mkdirSync(sessionDir, { recursive: true });
-  fs.writeFileSync(path.join(sessionDir, 'session.json'), JSON.stringify(session, null, 2));
-  fs.writeFileSync(path.join(sessionDir, 'chat.jsonl'), '');
-  fs.writeFileSync(path.join(SESSIONS_DIR, 'active.json'), JSON.stringify({ id }));
+  fs.mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(sessionDir, 'session.json'), JSON.stringify(session, null, 2), { mode: 0o600 });
+  fs.writeFileSync(path.join(sessionDir, 'chat.jsonl'), '', { mode: 0o600 });
+  fs.writeFileSync(path.join(SESSIONS_DIR, 'active.json'), JSON.stringify({ id }), { mode: 0o600 });
   chatBuffer = [];
   chatNextId = 0;
   return session;
@@ -411,7 +411,7 @@ function saveSession(): void {
   if (!sidebarSession) return;
   sidebarSession.lastActiveAt = new Date().toISOString();
   const sessionFile = path.join(SESSIONS_DIR, sidebarSession.id, 'session.json');
-  try { fs.writeFileSync(sessionFile, JSON.stringify(sidebarSession, null, 2)); } catch (err: any) {
+  try { fs.writeFileSync(sessionFile, JSON.stringify(sidebarSession, null, 2), { mode: 0o600 }); } catch (err: any) {
     console.error('[browse] Failed to save session:', err.message);
   }
 }
@@ -558,7 +558,7 @@ function spawnClaude(userMessage: string, extensionUrl?: string | null, forTabId
     tabId: agentTabId,
   });
   try {
-    fs.mkdirSync(gstackDir, { recursive: true });
+    fs.mkdirSync(gstackDir, { recursive: true, mode: 0o700 });
     fs.appendFileSync(agentQueue, entry + '\n');
   } catch (err: any) {
     addChatEntry({ ts: new Date().toISOString(), role: 'agent', type: 'agent_error', error: `Failed to queue: ${err.message}` });
@@ -614,7 +614,7 @@ function startAgentHealthCheck(): void {
 
 // Initialize session on startup
 function initSidebarSession(): void {
-  fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+  fs.mkdirSync(SESSIONS_DIR, { recursive: true, mode: 0o700 });
   sidebarSession = loadSession();
   if (!sidebarSession) {
     sidebarSession = createSession();
@@ -1331,7 +1331,7 @@ async function start() {
         chatBuffer = [];
         chatNextId = 0;
         if (sidebarSession) {
-          try { fs.writeFileSync(path.join(SESSIONS_DIR, sidebarSession.id, 'chat.jsonl'), ''); } catch (err: any) {
+          try { fs.writeFileSync(path.join(SESSIONS_DIR, sidebarSession.id, 'chat.jsonl'), '', { mode: 0o600 }); } catch (err: any) {
             console.error('[browse] Failed to clear chat file:', err.message);
           }
         }
@@ -1693,8 +1693,8 @@ start().catch((err) => {
   // stderr because the server is launched with detached: true, stdio: 'ignore'.
   try {
     const errorLogPath = path.join(config.stateDir, 'browse-startup-error.log');
-    fs.mkdirSync(config.stateDir, { recursive: true });
-    fs.writeFileSync(errorLogPath, `${new Date().toISOString()} ${err.message}\n${err.stack || ''}\n`);
+    fs.mkdirSync(config.stateDir, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(errorLogPath, `${new Date().toISOString()} ${err.message}\n${err.stack || ''}\n`, { mode: 0o600 });
   } catch {
     // stateDir may not exist — nothing more we can do
   }

@@ -49,7 +49,7 @@ function writeToInbox(message: string, pageUrl?: string, sessionId?: string): vo
   }
 
   const inboxDir = path.join(gitRoot, '.context', 'sidebar-inbox');
-  fs.mkdirSync(inboxDir, { recursive: true });
+  fs.mkdirSync(inboxDir, { recursive: true, mode: 0o700 });
 
   const now = new Date();
   const timestamp = now.toISOString().replace(/:/g, '-');
@@ -65,7 +65,7 @@ function writeToInbox(message: string, pageUrl?: string, sessionId?: string): vo
     sidebarSessionId: sessionId || 'unknown',
   };
 
-  fs.writeFileSync(tmpFile, JSON.stringify(inboxMessage, null, 2));
+  fs.writeFileSync(tmpFile, JSON.stringify(inboxMessage, null, 2), { mode: 0o600 });
   fs.renameSync(tmpFile, finalFile);
   console.log(`[sidebar-agent] Wrote inbox message: ${filename}`);
 }
@@ -413,8 +413,8 @@ function pollKillFile(): void {
 
 async function main() {
   const dir = path.dirname(QUEUE);
-  fs.mkdirSync(dir, { recursive: true });
-  if (!fs.existsSync(QUEUE)) fs.writeFileSync(QUEUE, '');
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (!fs.existsSync(QUEUE)) fs.writeFileSync(QUEUE, '', { mode: 0o600 });
 
   lastLine = countLines();
   await refreshToken();
