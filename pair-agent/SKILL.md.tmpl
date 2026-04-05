@@ -143,9 +143,15 @@ If the user also needs admin access (JS execution, cookies, storage):
 $B pair-agent --admin --client TARGET_HOST
 ```
 
-Show the output to the user:
-"Copy everything between the ═══ lines and paste it into your other agent's chat.
-The agent will follow the instructions to connect. The setup key expires in 5 minutes."
+**CRITICAL: You MUST output the full instruction block to the user.** The command
+prints everything between ═══ lines. Copy the ENTIRE block verbatim into your
+response so the user can copy-paste it into their other agent. Do NOT summarize it,
+do NOT skip it, do NOT just say "here's the output." The user needs to SEE the block
+to copy it. Output it inside a markdown code block so it's easy to select and copy.
+
+Then tell the user:
+"Copy the block above and paste it into your other agent's chat. The setup key
+expires in 5 minutes."
 
 **If ngrok is installed but NOT authed:** Walk the user through authentication:
 
