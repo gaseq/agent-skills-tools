@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.15.14.0] - 2026-04-06 — Batch Commands: 20x Faster Remote Browsing
+## [0.15.15.0] - 2026-04-06 — Batch Commands: 20x Faster Remote Browsing
 
 Remote agents controlling your browser through a tunnel used to pay 2-5 seconds of latency per command. A 20-tab crawl meant 160 round-trips and ~8 minutes of waiting. The new `POST /batch` endpoint collapses N commands into a single HTTP round-trip — that same crawl now takes ~5 seconds.
 
@@ -12,6 +12,14 @@ Remote agents controlling your browser through a tunnel used to pay 2-5 seconds 
 ### Changed
 
 - Hermes consolidated into the generic HTTP option in `/pair-agent` (was a separate menu choice with identical behavior).
+
+## [0.15.14.0] - 2026-04-05
+
+### Fixed
+
+- **`gstack-team-init` now detects and removes vendored gstack copies.** When you run `gstack-team-init` inside a repo that has gstack vendored at `.claude/skills/gstack/`, it automatically removes the vendored copy, untracks it from git, and adds it to `.gitignore`. No more stale vendored copies shadowing the global install.
+- **`/gstack-upgrade` respects team mode.** Step 4.5 now checks the `team_mode` config. In team mode, vendored copies are removed instead of synced, since the global install is the single source of truth.
+- **`team_mode` config key.** `./setup --team` and `./setup --no-team` now set a dedicated `team_mode` config key so the upgrade skill can reliably distinguish team mode from just having auto-upgrade enabled.
 
 ## [0.15.13.0] - 2026-04-04 — Team Mode
 
