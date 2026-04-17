@@ -23,7 +23,7 @@ RUN sed -i \
 # System deps (retry apt-get update — even Hetzner can blip occasionally)
 RUN for i in 1 2 3; do apt-get update && break || sleep 5; done \
     && apt-get install -y --no-install-recommends \
-    git curl unzip ca-certificates jq bc gpg \
+    git curl unzip xz-utils ca-certificates jq bc gpg \
     && rm -rf /var/lib/apt/lists/*
 
 # GitHub CLI
