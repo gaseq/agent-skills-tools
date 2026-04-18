@@ -40,10 +40,6 @@ Fork it. Improve it. Make it yours. And if you want to hate on free open source 
 5. Run `/qa` on your staging URL
 6. Stop there. You'll know if this is for you.
 
-## Writing style
-
-v1 prompts = simpler. gstack's default output explains technical terms on first use, frames questions in outcome terms ("what breaks for your users if..."), and keeps sentences short. Good writing for everyone, not just non-technical folks. If you'd rather read the older, tighter prose style with no glosses, run `gstack-config set explain_level terse` — it sticks across all skills. You can also tune how often gstack asks you questions with `/plan-tune`.
-
 ## Install — 30 seconds
 
 **Requirements:** [Claude Code](https://docs.anthropic.com/en/docs/claude-code), [Git](https://git-scm.com/), [Bun](https://bun.sh/) v1.0+, [Node.js](https://nodejs.org/) (Windows only)
