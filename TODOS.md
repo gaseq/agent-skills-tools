@@ -1,5 +1,19 @@
 # TODOS
 
+## P0: PACING_UPDATES_V0 — Louise's fatigue root cause (V1.1)
+
+**What:** Implement the pacing overhaul extracted from PLAN_TUNING_V1. Full design in `docs/designs/PACING_UPDATES_V0.md`. Requires: session-state model, `phase` field in question-log schema, registry extension for dynamic findings, pacing as skill-template control flow (not preamble prose), `bin/gstack-flip-decision` command, migration-prompt budget rule, first-run preamble audit, ranking threshold calibration from real V0 data, one-way-door uncapped rule, concrete verification values.
+
+**Why:** Louise de Sadeleer's "yes yes yes" during `/autoplan` was pacing + agency, not (only) jargon density. V1 addresses jargon (ELI10 writing). V1.1 addresses the interruption-volume half. Without this, V1 only gets halfway to the HOLY SHIT outcome.
+
+**Pros:** End-to-end answer to Louise's feedback. Ships real calibration data from V1 usage. Completes the V0 → V2 pacing arc started in PLAN_TUNING_V0.
+
+**Cons:** Substantial scope (10 items in `docs/designs/PACING_UPDATES_V0.md`). Needs its own CEO + Codex + DX + Eng review cycle. Calibration depends on real V0 question-log distribution.
+
+**Context:** PLAN_TUNING_V1 attempted to bundle pacing. Three eng-review passes + two Codex passes surfaced 10 structural gaps unfixable via plan-text editing. Extracted to V1.1 as a dedicated plan.
+
+**Depends on / blocked by:** V1 shipping (provides Louise's baseline transcript for calibration).
+
 ## Plan Tune (v2 deferrals from v0.19.0.0 rollback)
 
 All six items are gated on v1 dogfood results and the acceptance criteria in
