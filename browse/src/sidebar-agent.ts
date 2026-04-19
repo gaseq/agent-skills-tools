@@ -15,7 +15,8 @@ import * as path from 'path';
 import { safeUnlink } from './error-handling';
 import {
   checkCanaryInStructure, logAttempt, hashPayload, extractDomain,
-  combineVerdict, writeSessionState, readSessionState, type LayerSignal,
+  combineVerdict, writeSessionState, readSessionState, THRESHOLDS,
+  type LayerSignal,
 } from './security';
 import {
   loadTestsavant, scanPageContent, checkTranscript,
@@ -285,7 +286,43 @@ interface CanaryContext {
   onLeak: (channel: string) => void;
 }
 
-async function handleStreamEvent(event: any, tabId?: number, canaryCtx?: CanaryContext): Promise<void> {
+interface ToolResultScanContext {
+  scan: (toolName: string, text: string) => Promise<void>;
+}
+
+/**
+ * Per-tab map of tool_use_id → tool name. Lets the tool_result handler
+ * know what tool produced the content (Read, Grep, Glob, Bash $B ...) so
+ * we can tag attack logs with the ingress source.
+ */
+const toolUseRegistry = new Map<string, { toolName: string; toolInput: unknown }>();
+
+/**
+ * Extract plain-text content from a tool_result block. The Claude stream
+ * encodes it as either a string or an array of content blocks (text, image).
+ * We care about text — images can't carry prompt injection at this layer.
+ */
+function extractToolResultText(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  const parts: string[] = [];
+  for (const block of content) {
+    if (block && typeof block === 'object') {
+      const b = block as Record<string, unknown>;
+      if (b.type === 'text' && typeof b.text === 'string') parts.push(b.text);
+    }
+  }
+  return parts.join('\n');
+}
+
+/**
+ * Tools whose outputs should be ML-scanned. Bash/$B outputs already get
+ * scanned via the page-content flow. Read/Glob/Grep outputs have been
+ * uncovered — Codex review flagged this gap. Adding coverage here closes it.
+ */
+const SCANNED_TOOLS = new Set(['Read', 'Grep', 'Glob', 'Bash', 'WebFetch']);
+
+async function handleStreamEvent(event: any, tabId?: number, canaryCtx?: CanaryContext, toolResultScanCtx?: ToolResultScanContext): Promise<void> {
   // Canary check runs BEFORE any outbound send — we never want to relay
   // a leaked token to the sidepanel UI.
   if (canaryCtx) {
@@ -304,6 +341,9 @@ async function handleStreamEvent(event: any, tabId?: number, canaryCtx?: CanaryC
   if (event.type === 'assistant' && event.message?.content) {
     for (const block of event.message.content) {
       if (block.type === 'tool_use') {
+        // Register the tool_use so we can correlate tool_results back to
+        // the originating tool when they arrive in the next user-role message.
+        if (block.id) toolUseRegistry.set(block.id, { toolName: block.name, toolInput: block.input });
         await sendEvent({ type: 'tool_use', tool: block.name, input: summarizeToolInput(block.name, block.input) }, tabId);
       } else if (block.type === 'text' && block.text) {
         await sendEvent({ type: 'text', text: block.text }, tabId);
@@ -311,7 +351,32 @@ async function handleStreamEvent(event: any, tabId?: number, canaryCtx?: CanaryC
     }
   }
 
+  // Tool results come back in user-role messages. Content can be a string
+  // or an array of typed content blocks.
+  if (event.type === 'user' && event.message?.content) {
+    for (const block of event.message.content) {
+      if (block && typeof block === 'object' && block.type === 'tool_result') {
+        const meta = block.tool_use_id ? toolUseRegistry.get(block.tool_use_id) : null;
+        const toolName = meta?.toolName ?? 'Unknown';
+        const text = extractToolResultText(block.content);
+        // Scan this tool output with the ML classifier if the tool is in
+        // the SCANNED_TOOLS set and the content is non-trivial.
+        if (SCANNED_TOOLS.has(toolName) && text.length >= 32 && toolResultScanCtx) {
+          // Fire-and-forget — never block the stream handler. If BLOCK
+          // fires, onToolResultBlock handles kill + emit.
+          toolResultScanCtx.scan(toolName, text).catch(() => {});
+        }
+      }
+    }
+  }
+
   if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
+    if (event.content_block.id) {
+      toolUseRegistry.set(event.content_block.id, {
+        toolName: event.content_block.name,
+        toolInput: event.content_block.input,
+      });
+    }
     await sendEvent({ type: 'tool_use', tool: event.content_block.name, input: summarizeToolInput(event.content_block.name, event.content_block.input) }, tabId);
   }
 
@@ -520,6 +585,57 @@ async function askClaude(queueEntry: QueueEntry): Promise<void> {
       };
     }
 
+    // Tool-result ML scan context. Addresses the Codex review gap: Read,
+    // Grep, Glob, and WebFetch outputs enter Claude's context without
+    // passing through the Bash $B pipeline that content-security.ts
+    // already wraps. Scan them here.
+    let toolResultBlockFired = false;
+    const toolResultScanCtx: ToolResultScanContext = {
+      scan: async (toolName: string, text: string) => {
+        if (toolResultBlockFired) return;
+        const contentSignal = await scanPageContent(text);
+        if (contentSignal.confidence < THRESHOLDS.WARN) return;
+        // Signal crossed WARN — see if ensemble upgrades to BLOCK.
+        const signals: LayerSignal[] = [contentSignal];
+        if (shouldRunTranscriptCheck(signals)) {
+          signals.push(await checkTranscript({
+            user_message: queueEntry.message ?? '',
+            tool_calls: [{ tool_name: toolName, tool_input: {} }],
+          }));
+        }
+        const result = combineVerdict(signals);
+        if (result.verdict !== 'block') return;
+        toolResultBlockFired = true;
+        const domain = extractDomain(pageUrl ?? '');
+        logAttempt({
+          ts: new Date().toISOString(),
+          urlDomain: domain,
+          payloadHash: hashPayload(text.slice(0, 4096)),
+          confidence: result.confidence,
+          layer: 'testsavant_content',
+          verdict: 'block',
+        });
+        console.warn(`[sidebar-agent] Tool-result BLOCK on ${toolName} for tab ${tid} (confidence=${result.confidence.toFixed(3)})`);
+        await sendEvent({
+          type: 'security_event',
+          verdict: 'block',
+          reason: 'tool_result_ml',
+          layer: 'testsavant_content',
+          confidence: result.confidence,
+          domain,
+          tool: toolName,
+        }, tid);
+        await sendEvent({
+          type: 'agent_error',
+          error: `Session terminated — prompt injection detected in ${toolName} output`,
+        }, tid);
+        try { proc.kill('SIGTERM'); } catch (err: any) { if (err?.code !== 'ESRCH') throw err; }
+        setTimeout(() => {
+          try { proc.kill('SIGKILL'); } catch (err: any) { if (err?.code !== 'ESRCH') throw err; }
+        }, 2000);
+      },
+    };
+
     // Poll for per-tab cancel signal from server's killAgent()
     const cancelCheck = setInterval(() => {
       try {
@@ -541,7 +657,7 @@ async function askClaude(queueEntry: QueueEntry): Promise<void> {
       buffer = lines.pop() || '';
       for (const line of lines) {
         if (!line.trim()) continue;
-        try { handleStreamEvent(JSON.parse(line), tid, canaryCtx); } catch (err: any) {
+        try { handleStreamEvent(JSON.parse(line), tid, canaryCtx, toolResultScanCtx); } catch (err: any) {
           console.error(`[sidebar-agent] Tab ${tid}: Failed to parse stream line:`, line.slice(0, 100), err.message);
         }
       }
@@ -557,7 +673,7 @@ async function askClaude(queueEntry: QueueEntry): Promise<void> {
       activeProc = null;
       activeProcs.delete(tid);
       if (buffer.trim()) {
-        try { handleStreamEvent(JSON.parse(buffer), tid, canaryCtx); } catch (err: any) {
+        try { handleStreamEvent(JSON.parse(buffer), tid, canaryCtx, toolResultScanCtx); } catch (err: any) {
           console.error(`[sidebar-agent] Tab ${tid}: Failed to parse final buffer:`, buffer.slice(0, 100), err.message);
         }
       }
