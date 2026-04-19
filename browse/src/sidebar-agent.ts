@@ -13,6 +13,7 @@ import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { safeUnlink } from './error-handling';
+import { checkCanaryInStructure, logAttempt, hashPayload, extractDomain } from './security';
 
 const QUEUE = process.env.SIDEBAR_QUEUE_PATH || path.join(process.env.HOME || '/tmp', '.gstack', 'sidebar-agent-queue.jsonl');
 const KILL_FILE = path.join(path.dirname(QUEUE), 'sidebar-agent-kill');
@@ -36,6 +37,7 @@ interface QueueEntry {
   pageUrl?: string | null;
   sessionId?: string | null;
   ts?: string;
+  canary?: string; // session-scoped token; leak = prompt injection evidence
 }
 
 function isValidQueueEntry(e: unknown): e is QueueEntry {
@@ -55,6 +57,7 @@ function isValidQueueEntry(e: unknown): e is QueueEntry {
   if (obj.message !== undefined && obj.message !== null && typeof obj.message !== 'string') return false;
   if (obj.pageUrl !== undefined && obj.pageUrl !== null && typeof obj.pageUrl !== 'string') return false;
   if (obj.sessionId !== undefined && obj.sessionId !== null && typeof obj.sessionId !== 'string') return false;
+  if (obj.canary !== undefined && typeof obj.canary !== 'string') return false;
   return true;
 }
 
@@ -228,7 +231,63 @@ function summarizeToolInput(tool: string, input: any): string {
   return describeToolCall(tool, input);
 }
 
-async function handleStreamEvent(event: any, tabId?: number): Promise<void> {
+/**
+ * Scan a Claude stream event for the session canary. Returns the channel where
+ * it leaked, or null if clean. Covers every outbound channel: text blocks,
+ * text deltas, tool_use arguments (including nested URL/path/command strings),
+ * and result payloads.
+ */
+function detectCanaryLeak(event: any, canary: string): string | null {
+  if (!canary) return null;
+
+  if (event.type === 'assistant' && event.message?.content) {
+    for (const block of event.message.content) {
+      if (block.type === 'text' && typeof block.text === 'string' && block.text.includes(canary)) {
+        return 'assistant_text';
+      }
+      if (block.type === 'tool_use' && checkCanaryInStructure(block.input, canary)) {
+        return `tool_use:${block.name}`;
+      }
+    }
+  }
+  if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
+    if (checkCanaryInStructure(event.content_block.input, canary)) {
+      return `tool_use:${event.content_block.name}`;
+    }
+  }
+  if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
+    if (typeof event.delta.text === 'string' && event.delta.text.includes(canary)) {
+      return 'text_delta';
+    }
+  }
+  if (event.type === 'content_block_delta' && event.delta?.type === 'input_json_delta') {
+    if (typeof event.delta.partial_json === 'string' && event.delta.partial_json.includes(canary)) {
+      return 'tool_input_delta';
+    }
+  }
+  if (event.type === 'result' && typeof event.result === 'string' && event.result.includes(canary)) {
+    return 'result';
+  }
+  return null;
+}
+
+interface CanaryContext {
+  canary: string;
+  pageUrl: string;
+  onLeak: (channel: string) => void;
+}
+
+async function handleStreamEvent(event: any, tabId?: number, canaryCtx?: CanaryContext): Promise<void> {
+  // Canary check runs BEFORE any outbound send — we never want to relay
+  // a leaked token to the sidepanel UI.
+  if (canaryCtx) {
+    const channel = detectCanaryLeak(event, canaryCtx.canary);
+    if (channel) {
+      canaryCtx.onLeak(channel);
+      return; // drop the event — never relay content that leaked the canary
+    }
+  }
+
   if (event.type === 'system' && event.session_id) {
     // Relay claude session ID for --resume support
     await sendEvent({ type: 'system', claudeSessionId: event.session_id }, tabId);
@@ -267,14 +326,62 @@ async function handleStreamEvent(event: any, tabId?: number): Promise<void> {
   }
 }
 
+/**
+ * Fire the prompt-injection-detected event to the server. This terminates
+ * the session from the sidepanel's perspective and renders the canary leak
+ * banner. Also logs locally (salted hash + domain only) and fires telemetry
+ * if configured.
+ */
+async function onCanaryLeaked(params: {
+  tabId: number;
+  channel: string;
+  canary: string;
+  pageUrl: string;
+}): Promise<void> {
+  const { tabId, channel, canary, pageUrl } = params;
+  const domain = extractDomain(pageUrl);
+  console.warn(`[sidebar-agent] CANARY LEAK detected on ${channel} for tab ${tabId} (domain=${domain || 'unknown'})`);
+
+  // Local log — salted hash + domain only, never the payload
+  logAttempt({
+    ts: new Date().toISOString(),
+    urlDomain: domain,
+    payloadHash: hashPayload(canary), // hash the canary, not the payload (which might be leaked content)
+    confidence: 1.0,
+    layer: 'canary',
+    verdict: 'block',
+  });
+
+  // Broadcast to sidepanel so it can render the approved banner
+  await sendEvent({
+    type: 'security_event',
+    verdict: 'block',
+    reason: 'canary_leaked',
+    layer: 'canary',
+    channel,
+    domain,
+  }, tabId);
+
+  // Also emit agent_error so the sidepanel's existing error surface
+  // reflects that the session terminated. Keeps old clients working.
+  await sendEvent({
+    type: 'agent_error',
+    error: `Session terminated — prompt injection detected${domain ? ` from ${domain}` : ''}`,
+  }, tabId);
+}
+
 async function askClaude(queueEntry: QueueEntry): Promise<void> {
-  const { prompt, args, stateFile, cwd, tabId } = queueEntry;
+  const { prompt, args, stateFile, cwd, tabId, canary, pageUrl } = queueEntry;
   const tid = tabId ?? 0;
 
   processingTabs.add(tid);
   await sendEvent({ type: 'agent_start' }, tid);
 
   return new Promise((resolve) => {
+    // Canary context is set after proc is spawned (needs proc reference for kill).
+    let canaryCtx: CanaryContext | undefined;
+    let canaryTriggered = false;
+
     // Use args from queue entry (server sets --model, --allowedTools, prompt framing).
     // Fall back to defaults only if queue entry has no args (backward compat).
     // Write doesn't expand attack surface beyond what Bash already provides.
@@ -317,6 +424,25 @@ async function askClaude(queueEntry: QueueEntry): Promise<void> {
 
     proc.stdin.end();
 
+    // Now that proc exists, set up the canary-leak handler. It fires at most
+    // once; on fire we kill the subprocess, emit security_event + agent_error,
+    // and let the normal close handler resolve the promise.
+    if (canary) {
+      canaryCtx = {
+        canary,
+        pageUrl: pageUrl ?? '',
+        onLeak: (channel: string) => {
+          if (canaryTriggered) return;
+          canaryTriggered = true;
+          onCanaryLeaked({ tabId: tid, channel, canary, pageUrl: pageUrl ?? '' });
+          try { proc.kill('SIGTERM'); } catch (err: any) { if (err?.code !== 'ESRCH') throw err; }
+          setTimeout(() => {
+            try { proc.kill('SIGKILL'); } catch (err: any) { if (err?.code !== 'ESRCH') throw err; }
+          }, 2000);
+        },
+      };
+    }
+
     // Poll for per-tab cancel signal from server's killAgent()
     const cancelCheck = setInterval(() => {
       try {
@@ -338,7 +464,7 @@ async function askClaude(queueEntry: QueueEntry): Promise<void> {
       buffer = lines.pop() || '';
       for (const line of lines) {
         if (!line.trim()) continue;
-        try { handleStreamEvent(JSON.parse(line), tid); } catch (err: any) {
+        try { handleStreamEvent(JSON.parse(line), tid, canaryCtx); } catch (err: any) {
           console.error(`[sidebar-agent] Tab ${tid}: Failed to parse stream line:`, line.slice(0, 100), err.message);
         }
       }
@@ -354,7 +480,7 @@ async function askClaude(queueEntry: QueueEntry): Promise<void> {
       activeProc = null;
       activeProcs.delete(tid);
       if (buffer.trim()) {
-        try { handleStreamEvent(JSON.parse(buffer), tid); } catch (err: any) {
+        try { handleStreamEvent(JSON.parse(buffer), tid, canaryCtx); } catch (err: any) {
           console.error(`[sidebar-agent] Tab ${tid}: Failed to parse final buffer:`, buffer.slice(0, 100), err.message);
         }
       }
