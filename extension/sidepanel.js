@@ -107,6 +107,102 @@ let agentText = '';        // Accumulated text
 // repeat rendering on reconnect or tab switch (server replays from disk)
 const renderedEntryIds = new Set();
 
+// Security banner (variant A from /plan-design-review 2026-04-19).
+// Renders on security_event — canary leaks, ML classifier BLOCK verdicts.
+// Defense-in-depth trust UX — user sees WHICH layer fired at WHAT confidence.
+const SECURITY_LAYER_LABELS = {
+  testsavant_content: 'Content ML',
+  transcript_classifier: 'Transcript ML',
+  aria_regex: 'ARIA pattern',
+  canary: 'Canary leak',
+};
+
+function showSecurityBanner(event) {
+  const banner = document.getElementById('security-banner');
+  if (!banner) return;
+
+  const title = document.getElementById('security-banner-title');
+  const subtitle = document.getElementById('security-banner-subtitle');
+  const layersEl = document.getElementById('security-banner-layers');
+  const expandBtn = document.getElementById('security-banner-expand');
+  const details = document.getElementById('security-banner-details');
+  const chevron = banner.querySelector('.security-banner-chevron');
+
+  // Title + subtitle
+  if (title) title.textContent = 'Session terminated';
+  if (subtitle) {
+    const fromDomain = event.domain ? ` from ${event.domain}` : '';
+    subtitle.textContent = `— prompt injection detected${fromDomain}`;
+  }
+
+  // Layer signals list (mono scores)
+  if (layersEl) {
+    layersEl.innerHTML = '';
+    const rows = [];
+    // If we got a primary layer + confidence, show that first
+    if (event.layer) {
+      rows.push({ layer: event.layer, confidence: event.confidence ?? 1.0 });
+    }
+    // Any additional signals the agent sent
+    if (Array.isArray(event.signals)) {
+      for (const s of event.signals) {
+        if (s.layer && !rows.some(r => r.layer === s.layer)) {
+          rows.push({ layer: s.layer, confidence: s.confidence ?? 0 });
+        }
+      }
+    }
+    for (const row of rows) {
+      const label = SECURITY_LAYER_LABELS[row.layer] || row.layer;
+      const score = Number(row.confidence).toFixed(2);
+      const div = document.createElement('div');
+      div.className = 'security-banner-layer';
+      div.innerHTML = `<span class="security-banner-layer-name">${label}</span><span class="security-banner-layer-score">${score}</span>`;
+      layersEl.appendChild(div);
+    }
+  }
+
+  // Reset expand state on each render
+  if (expandBtn && details) {
+    expandBtn.setAttribute('aria-expanded', 'false');
+    details.hidden = true;
+    if (chevron) chevron.style.transform = 'rotate(0deg)';
+  }
+
+  banner.style.display = 'block';
+}
+
+function hideSecurityBanner() {
+  const banner = document.getElementById('security-banner');
+  if (banner) banner.style.display = 'none';
+}
+
+// Wire up banner interactivity once on load
+document.addEventListener('DOMContentLoaded', () => {
+  const closeBtn = document.getElementById('security-banner-close');
+  const expandBtn = document.getElementById('security-banner-expand');
+  const banner = document.getElementById('security-banner');
+  if (closeBtn) {
+    closeBtn.addEventListener('click', hideSecurityBanner);
+  }
+  if (expandBtn) {
+    expandBtn.addEventListener('click', () => {
+      const details = document.getElementById('security-banner-details');
+      const chevron = banner && banner.querySelector('.security-banner-chevron');
+      if (!details) return;
+      const open = !details.hidden;
+      details.hidden = open;
+      expandBtn.setAttribute('aria-expanded', String(!open));
+      if (chevron) chevron.style.transform = open ? 'rotate(0deg)' : 'rotate(180deg)';
+    });
+  }
+  // Escape dismisses the banner (a11y)
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && banner && banner.style.display !== 'none') {
+      hideSecurityBanner();
+    }
+  });
+});
+
 function addChatEntry(entry) {
   // Dedup by entry ID — prevent repeat rendering on reconnect/replay
   if (entry.id !== undefined) {
@@ -225,6 +321,11 @@ function handleAgentEvent(entry) {
     }
     agentContainer = null;
     agentTextEl = null;
+    return;
+  }
+
+  if (entry.type === 'security_event') {
+    showSecurityBanner(entry);
     return;
   }
 
