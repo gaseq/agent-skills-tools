@@ -156,7 +156,14 @@ function showSecurityBanner(event) {
       const score = Number(row.confidence).toFixed(2);
       const div = document.createElement('div');
       div.className = 'security-banner-layer';
-      div.innerHTML = `<span class="security-banner-layer-name">${label}</span><span class="security-banner-layer-score">${score}</span>`;
+      const nameSpan = document.createElement('span');
+      nameSpan.className = 'security-banner-layer-name';
+      nameSpan.textContent = label;
+      const scoreSpan = document.createElement('span');
+      scoreSpan.className = 'security-banner-layer-score';
+      scoreSpan.textContent = score;
+      div.appendChild(nameSpan);
+      div.appendChild(scoreSpan);
       layersEl.appendChild(div);
     }
   }
