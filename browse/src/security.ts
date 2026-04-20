@@ -38,7 +38,7 @@ export const THRESHOLDS = {
   LOG_ONLY: 0.40,
 } as const;
 
-export type Verdict = 'safe' | 'log_only' | 'warn' | 'block';
+export type Verdict = 'safe' | 'log_only' | 'warn' | 'block' | 'user_overrode';
 
 export type LayerName =
   | 'testsavant_content'
@@ -422,6 +422,76 @@ export function readSessionState(): SessionState | null {
   } catch {
     return null;
   }
+}
+
+// ─── User-in-the-loop review on BLOCK ────────────────────────
+//
+// When a tool-output BLOCK fires, the user gets to see the suspected text
+// and decide. The sidepanel posts to /security-decision, server writes a
+// per-tab file under ~/.gstack/security/decisions/, sidebar-agent polls
+// for it. File-based on purpose: sidebar-agent.ts is a separate subprocess
+// and this is the same pattern the existing per-tab cancel file uses.
+
+const DECISIONS_DIR = path.join(SECURITY_DIR, 'decisions');
+
+export type SecurityDecision = 'allow' | 'block';
+
+export function decisionFileForTab(tabId: number): string {
+  return path.join(DECISIONS_DIR, `tab-${tabId}.json`);
+}
+
+export interface DecisionRecord {
+  tabId: number;
+  decision: SecurityDecision;
+  ts: string;
+  reason?: string;
+}
+
+export function writeDecision(record: DecisionRecord): void {
+  try {
+    fs.mkdirSync(DECISIONS_DIR, { recursive: true, mode: 0o700 });
+    const file = decisionFileForTab(record.tabId);
+    const tmp = `${file}.tmp.${process.pid}`;
+    fs.writeFileSync(tmp, JSON.stringify(record), { mode: 0o600 });
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    console.error('[security] writeDecision failed:', (err as Error).message);
+  }
+}
+
+export function readDecision(tabId: number): DecisionRecord | null {
+  try {
+    const file = decisionFileForTab(tabId);
+    if (!fs.existsSync(file)) return null;
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+export function clearDecision(tabId: number): void {
+  try {
+    const file = decisionFileForTab(tabId);
+    if (fs.existsSync(file)) fs.unlinkSync(file);
+  } catch {
+    // best effort
+  }
+}
+
+/**
+ * Truncate + sanitize tool output for display in the review banner.
+ * - Max 500 chars (UI budget)
+ * - Strip control chars, collapse whitespace
+ * - Append "…" if truncated
+ */
+export function excerptForReview(text: string, max = 500): string {
+  if (!text) return '';
+  const cleaned = text
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (cleaned.length <= max) return cleaned;
+  return cleaned.slice(0, max) + '…';
 }
 
 // ─── Status reporting (for shield icon via /health) ──────────
