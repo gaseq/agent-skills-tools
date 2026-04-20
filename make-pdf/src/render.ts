@@ -34,6 +34,11 @@ export interface RenderOptions {
   // Page layout
   pageSize?: "letter" | "a4" | "legal" | "tabloid";
   margins?: string;
+
+  // Footer behavior. pageNumbers defaults to true. When footerTemplate is set,
+  // CSS page numbers are suppressed so the custom Chromium footer wins cleanly.
+  pageNumbers?: boolean;
+  footerTemplate?: string;
 }
 
 export interface RenderResult {
@@ -74,6 +79,10 @@ export function render(opts: RenderOptions): RenderResult {
   const derivedDate = opts.date ?? formatToday();
 
   // 5. Build CSS
+  // CSS is the single source of truth for page numbers (Chromium native
+  // numbering is always off in orchestrator). If the caller supplied a custom
+  // footerTemplate, suppress CSS page numbers too so their footer wins.
+  const showPageNumbers = opts.pageNumbers !== false && !opts.footerTemplate;
   const cssOptions: PrintCssOptions = {
     cover: opts.cover,
     toc: opts.toc,
@@ -83,6 +92,7 @@ export function render(opts: RenderOptions): RenderResult {
     runningHeader: derivedTitle,
     pageSize: opts.pageSize,
     margins: opts.margins,
+    pageNumbers: showPageNumbers,
   };
   const css = printCss(cssOptions);
 

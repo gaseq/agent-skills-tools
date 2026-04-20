@@ -37,6 +37,11 @@ export interface PrintCssOptions {
 
   // Margins (default 1in)
   margins?: string;
+
+  // Whether to render "N of M" page numbers in the @page @bottom-center rule.
+  // Default true. Set false to suppress CSS numbering (used when the caller
+  // supplies a custom Chromium footerTemplate, or when --no-page-numbers).
+  pageNumbers?: boolean;
 }
 
 /**
@@ -69,6 +74,7 @@ export function printCss(opts: PrintCssOptions = {}): string {
 function pageRules(size: string, margin: string, opts: PrintCssOptions): string {
   const runningHeader = escapeCssString(opts.runningHeader ?? "");
   const showConfidential = opts.confidential !== false;
+  const showPageNumbers = opts.pageNumbers !== false;
 
   return [
     `@page {`,
@@ -77,7 +83,9 @@ function pageRules(size: string, margin: string, opts: PrintCssOptions): string 
     runningHeader
       ? `  @top-center { content: "${runningHeader}"; font-family: Helvetica, Arial, sans-serif; font-size: 9pt; color: #666; }`
       : ``,
-    `  @bottom-center { content: counter(page) " of " counter(pages); font-family: Helvetica, Arial, sans-serif; font-size: 9pt; color: #666; }`,
+    showPageNumbers
+      ? `  @bottom-center { content: counter(page) " of " counter(pages); font-family: Helvetica, Arial, sans-serif; font-size: 9pt; color: #666; }`
+      : ``,
     showConfidential
       ? `  @bottom-right { content: "CONFIDENTIAL"; font-family: Helvetica, Arial, sans-serif; font-size: 8pt; color: #aaa; letter-spacing: 0.05em; }`
       : ``,

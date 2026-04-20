@@ -311,4 +311,46 @@ describe("printCss", () => {
     // Confirm no p-indent slipped in
     expect(css).not.toMatch(/p\s*\+\s*p\s*\{[^}]*text-indent/);
   });
+
+  test("emits @bottom-center page-number rule by default", () => {
+    const css = printCss();
+    expect(css).toMatch(/@bottom-center\s*\{\s*content:\s*counter\(page\)/);
+  });
+
+  test("suppresses @bottom-center page-number rule when pageNumbers=false", () => {
+    const css = printCss({ pageNumbers: false });
+    expect(css).not.toMatch(/@bottom-center\s*\{\s*content:\s*counter\(page\)/);
+  });
+
+  test("still emits @bottom-center when pageNumbers=true (explicit)", () => {
+    const css = printCss({ pageNumbers: true });
+    expect(css).toMatch(/@bottom-center\s*\{\s*content:\s*counter\(page\)/);
+  });
+});
+
+// ─── render() — pageNumbers / footerTemplate data flow ───────────────
+
+describe("render() — pageNumbers data flow", () => {
+  test("CSS footer renders by default", () => {
+    const result = render({ markdown: `# Doc\n\nBody.` });
+    expect(result.printCss).toMatch(/@bottom-center\s*\{\s*content:\s*counter\(page\)/);
+  });
+
+  test("--no-page-numbers reaches the CSS layer", () => {
+    const result = render({ markdown: `# Doc\n\nBody.`, pageNumbers: false });
+    expect(result.printCss).not.toMatch(/@bottom-center\s*\{\s*content:\s*counter\(page\)/);
+  });
+
+  test("footerTemplate suppresses CSS page numbers (custom footer wins)", () => {
+    const result = render({
+      markdown: `# Doc\n\nBody.`,
+      footerTemplate: `<div class="foo">custom</div>`,
+    });
+    expect(result.printCss).not.toMatch(/@bottom-center\s*\{\s*content:\s*counter\(page\)/);
+  });
+
+  test("pageNumbers=true + no footerTemplate keeps CSS footer", () => {
+    const result = render({ markdown: `# Doc`, pageNumbers: true });
+    expect(result.printCss).toMatch(/@bottom-center\s*\{\s*content:\s*counter\(page\)/);
+  });
 });
