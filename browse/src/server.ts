@@ -25,7 +25,7 @@ import {
   runContentFilters, type ContentFilterResult,
   markHiddenElements, getCleanTextWithStripping, cleanupHiddenMarkers,
 } from './content-security';
-import { generateCanary, injectCanary, getStatus as getSecurityStatus } from './security';
+import { generateCanary, injectCanary, getStatus as getSecurityStatus, writeDecision } from './security';
 import { handleSnapshot, SNAPSHOT_FLAGS } from './snapshot';
 import {
   initRegistry, validateToken as validateScopedToken, checkScope, checkDomain,
@@ -543,6 +543,11 @@ function processAgentEvent(event: any): void {
       channel: event.channel,
       tool: event.tool,
       signals: event.signals,
+      // Reviewable flow fields — sidepanel renders [Allow] / [Block] buttons
+      // and the suspected text excerpt when reviewable=true.
+      reviewable: event.reviewable,
+      suspected_text: event.suspected_text,
+      tabId: event.tabId,
     } as any);
     return;
   }
@@ -1966,6 +1971,28 @@ async function start() {
       }
 
       // Kill hung agent
+      // User's decision on a reviewable BLOCK (from the security banner).
+      // Writes ~/.gstack/security/decisions/tab-<id>.json that sidebar-agent
+      // polls. Accepts {tabId: number, decision: 'allow'|'block'} JSON body.
+      if (url.pathname === '/security-decision' && req.method === 'POST') {
+        if (!validateAuth(req)) {
+          return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+        }
+        const body = await req.json().catch(() => ({}));
+        const tabId = Number(body.tabId);
+        const decision = body.decision;
+        if (!Number.isFinite(tabId) || (decision !== 'allow' && decision !== 'block')) {
+          return new Response(JSON.stringify({ error: 'Invalid request' }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+        }
+        writeDecision({
+          tabId,
+          decision,
+          ts: new Date().toISOString(),
+          reason: typeof body.reason === 'string' ? body.reason.slice(0, 200) : undefined,
+        });
+        return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+
       if (url.pathname === '/sidebar-agent/kill' && req.method === 'POST') {
         if (!validateAuth(req)) {
           return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401, headers: { 'Content-Type': 'application/json' } });
