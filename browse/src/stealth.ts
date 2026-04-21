@@ -22,7 +22,7 @@
  *   // Call applyStealthPatches(context) after creating context
  */
 
-import type { BrowserContext } from 'playwright-core';
+import type { BrowserContext } from 'playwright';
 
 /**
  * Chromium launch args that reduce automation fingerprint.
@@ -73,33 +73,53 @@ export async function applyStealthPatches(
       // Bot detectors check BOTH the value AND property existence.
       // We need to delete it from the prototype chain entirely,
       // not just override the value to undefined.
+      //
+      // IMPORTANT: If prototype delete fails, we must NOT define-then-delete
+      // on the instance, as deleting the instance property re-exposes the
+      // prototype getter (which returns true). Instead, override on prototype.
       try {
         delete (Navigator.prototype as any).webdriver;
-      } catch { /* immutable in some envs */ }
-      try {
-        Object.defineProperty(navigator, 'webdriver', {
-          get: () => undefined,
-          configurable: true,
-        });
-        delete (navigator as any).webdriver;
-      } catch { /* fallback: at least the value is undefined */ }
+      } catch {
+        // Prototype delete failed (immutable) — override the getter on
+        // the prototype itself so it returns undefined.
+        try {
+          Object.defineProperty(Navigator.prototype, 'webdriver', {
+            get: () => undefined,
+            configurable: true,
+          });
+        } catch { /* truly locked down; value override is best we can do */ }
+      }
 
       // ========================================
       // 2. WEBGL RENDERER (SwiftShader = bot)
       // ========================================
       // SwiftShader is a software GPU used in containers/headless.
       // Real machines report their actual GPU. Spoof to match UA platform.
+      // Only spoof the unmasked vendor/renderer when the debug extension is
+      // actually available on the context. Returning values for these params
+      // when the extension wasn't requested is detectable as synthetic.
       const origGetParameter = WebGLRenderingContext.prototype.getParameter;
       WebGLRenderingContext.prototype.getParameter = function (param: GLenum) {
-        if (param === 0x9245) return vendor;  // UNMASKED_VENDOR_WEBGL
-        if (param === 0x9246) return renderer; // UNMASKED_RENDERER_WEBGL
+        if (param === 0x9245 || param === 0x9246) {
+          // Only spoof if the context actually has the debug extension
+          const ext = this.getExtension('WEBGL_debug_renderer_info');
+          if (ext) {
+            if (param === 0x9245) return vendor;
+            if (param === 0x9246) return renderer;
+          }
+        }
         return origGetParameter.call(this, param);
       };
       if (typeof WebGL2RenderingContext !== 'undefined') {
         const origGet2 = WebGL2RenderingContext.prototype.getParameter;
         WebGL2RenderingContext.prototype.getParameter = function (param: GLenum) {
-          if (param === 0x9245) return vendor;
-          if (param === 0x9246) return renderer;
+          if (param === 0x9245 || param === 0x9246) {
+            const ext = this.getExtension('WEBGL_debug_renderer_info');
+            if (ext) {
+              if (param === 0x9245) return vendor;
+              if (param === 0x9246) return renderer;
+            }
+          }
           return origGet2.call(this, param);
         };
       }
@@ -140,8 +160,8 @@ export async function applyStealthPatches(
           length: { get: () => mimes.length, enumerable: true },
           0: { get: () => mimes[0] },
           1: { get: () => mimes[1] },
-          item: { value: (i: number) => mimes[i] },
-          namedItem: { value: (name: string) => mimes.find(m => m.type === name) },
+          item: { value: (i: number) => mimes[i] ?? null },
+          namedItem: { value: (name: string) => mimes.find(m => m.type === name) ?? null },
         });
         return p;
       };
@@ -150,8 +170,8 @@ export async function applyStealthPatches(
       const arr = Object.create(PluginArray.prototype);
       Object.defineProperties(arr, {
         length: { get: () => plugins.length, enumerable: true },
-        item: { value: (i: number) => plugins[i] },
-        namedItem: { value: (n: string) => plugins.find((p: any) => p.name === n) },
+        item: { value: (i: number) => plugins[i] ?? null },
+        namedItem: { value: (n: string) => plugins.find((p: any) => p.name === n) ?? null },
         refresh: { value: () => {} },
       });
       plugins.forEach((p, i) => Object.defineProperty(arr, i, { get: () => p, enumerable: true }));
@@ -172,11 +192,16 @@ export async function applyStealthPatches(
         installState: () => 'not_installed',
         runningState: () => 'cannot_run',
       };
-      w.chrome.runtime = w.chrome.runtime || {};
-      w.chrome.runtime.connect = () => {};
-      w.chrome.runtime.sendMessage = () => {};
-      w.chrome.runtime.onMessage = { addListener: () => {}, removeListener: () => {} };
-      w.chrome.runtime.onConnect = { addListener: () => {}, removeListener: () => {} };
+      // Only stub chrome.runtime if it doesn't already exist (i.e., no extension loaded).
+      // Overwriting real extension APIs breaks messaging between content scripts,
+      // background scripts, and the sidepanel.
+      if (!w.chrome.runtime) {
+        w.chrome.runtime = {};
+      }
+      if (!w.chrome.runtime.connect) w.chrome.runtime.connect = () => {};
+      if (!w.chrome.runtime.sendMessage) w.chrome.runtime.sendMessage = () => {};
+      if (!w.chrome.runtime.onMessage) w.chrome.runtime.onMessage = { addListener: () => {}, removeListener: () => {} };
+      if (!w.chrome.runtime.onConnect) w.chrome.runtime.onConnect = { addListener: () => {}, removeListener: () => {} };
       if (!w.chrome.csi) w.chrome.csi = () => ({});
       if (!w.chrome.loadTimes) {
         w.chrome.loadTimes = () => ({
@@ -240,7 +265,15 @@ export async function applyStealthPatches(
       if (origQuery) {
         (navigator.permissions as any).query = (params: any) => {
           if (params.name === 'notifications') {
-            return Promise.resolve({ state: 'prompt', onchange: null } as PermissionStatus);
+            // Return a proper PermissionStatus-like object with EventTarget methods
+            // to avoid breakage when sites call addEventListener on the result.
+            const status = Object.create(EventTarget.prototype);
+            Object.defineProperties(status, {
+              state: { get: () => 'prompt', enumerable: true },
+              name: { get: () => 'notifications', enumerable: true },
+              onchange: { value: null, writable: true, enumerable: true },
+            });
+            return Promise.resolve(status as PermissionStatus);
           }
           return origQuery.call(navigator.permissions, params);
         };
@@ -283,6 +316,12 @@ export async function applyStealthPatches(
         return nativeStr.call(this);
       };
       overrides.set(Function.prototype.toString, 'function toString() { [native code] }');
+
+      // Register all patched functions so .toString() looks native
+      overrides.set(WebGLRenderingContext.prototype.getParameter, 'function getParameter() { [native code] }');
+      if (typeof WebGL2RenderingContext !== 'undefined') {
+        overrides.set(WebGL2RenderingContext.prototype.getParameter, 'function getParameter() { [native code] }');
+      }
     },
     [gpuVendor, gpuRenderer] as [string, string],
   );
