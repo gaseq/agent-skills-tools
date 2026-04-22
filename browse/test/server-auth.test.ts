@@ -184,9 +184,9 @@ describe('Server auth security', () => {
     expect(pairBlock).toContain('verifiedTunnelUrl');
     expect(pairBlock).toContain('Tunnel probe failed');
     expect(pairBlock).toContain('marking tunnel as dead');
-    // Must reset tunnel state on failure
-    expect(pairBlock).toContain('tunnelActive = false');
-    expect(pairBlock).toContain('tunnelUrl = null');
+    // Must tear down tunnel state on failure (via closeTunnel helper — clears
+    // tunnelActive, tunnelUrl, tunnelListener, and the tunnel Bun.serve listener)
+    expect(pairBlock).toContain('closeTunnel()');
   });
 
   // Test 11b: /pair returns null tunnel_url when tunnel is dead
@@ -203,7 +203,8 @@ describe('Server auth security', () => {
     const tunnelBlock = sliceBetween(SERVER_SRC, "url.pathname === '/tunnel/start'", "url.pathname === '/refs'");
     // Must probe before returning cached URL
     expect(tunnelBlock).toContain('Cached tunnel is dead');
-    expect(tunnelBlock).toContain('tunnelActive = false');
+    // Must tear down tunnel state on stale detection (via closeTunnel helper)
+    expect(tunnelBlock).toContain('closeTunnel()');
     // Must fall through to restart when dead
     expect(tunnelBlock).toContain('restarting');
   });

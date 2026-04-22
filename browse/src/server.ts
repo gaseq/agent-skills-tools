@@ -41,6 +41,7 @@ import { inspectElement, modifyStyle, resetModifications, getModificationHistory
 // Bun.spawn used instead of child_process.spawn (compiled bun binaries
 // fail posix_spawn on all executables including /bin/bash)
 import { safeUnlink, safeUnlinkQuiet, safeKill } from './error-handling';
+import { logTunnelDenial } from './tunnel-denial-log';
 import * as fs from 'fs';
 import * as net from 'net';
 import * as path from 'path';
@@ -59,9 +60,101 @@ const IDLE_TIMEOUT_MS = parseInt(process.env.BROWSE_IDLE_TIMEOUT || '1800000', 1
 // Sidebar chat is always enabled in headed mode (ungated in v0.12.0)
 
 // ─── Tunnel State ───────────────────────────────────────────────
+//
+// Dual-listener architecture: the daemon binds TWO HTTP listeners when a
+// tunnel is active. The local listener serves bootstrap + CLI + sidebar
+// (never exposed to ngrok). The tunnel listener serves only the pairing
+// ceremony and scoped-token command endpoints (the ONLY port ngrok forwards).
+//
+// Security property comes from physical port separation: a tunnel caller
+// cannot reach bootstrap endpoints because they live on a different TCP
+// socket, not because of any per-request check.
 let tunnelActive = false;
 let tunnelUrl: string | null = null;
-let tunnelListener: any = null; // ngrok listener handle
+let tunnelListener: any = null;           // ngrok listener handle
+let tunnelServer: ReturnType<typeof Bun.serve> | null = null; // tunnel HTTP listener
+
+/** Which HTTP listener accepted this request. */
+export type Surface = 'local' | 'tunnel';
+
+/**
+ * Paths reachable over the tunnel surface. Everything else returns 404.
+ *
+ * `/connect` is the only unauthenticated tunnel endpoint — POST for setup-key
+ * exchange, GET for an `{alive: true}` probe used by /pair and /tunnel/start
+ * to detect dead ngrok tunnels. Other paths in this set require a scoped
+ * token via Authorization: Bearer.
+ *
+ * Updating this set is a deliberate security decision. Every addition widens
+ * the tunnel attack surface.
+ */
+const TUNNEL_PATHS = new Set<string>([
+  '/connect',
+  '/command',
+  '/sidebar-chat',
+]);
+
+/**
+ * Commands reachable via POST /command over the tunnel surface. A paired
+ * remote agent can drive the browser (goto, click, text, etc.) but cannot
+ * configure the daemon, bootstrap new sessions, import cookies, or reach
+ * extension-inspector state. This allowlist maps to the eng-review decision
+ * logged in the CEO plan for sec-wave v1.6.0.0.
+ */
+const TUNNEL_COMMANDS = new Set<string>([
+  'goto', 'click', 'text', 'screenshot',
+  'html', 'links', 'forms', 'accessibility',
+  'attrs', 'media', 'data',
+  'scroll', 'press', 'type', 'select', 'wait', 'eval',
+]);
+
+/**
+ * Read ngrok authtoken from env var, ~/.gstack/ngrok.env, or ngrok's native
+ * config files.  Returns null if nothing found.  Shared between the
+ * /tunnel/start handler and the BROWSE_TUNNEL=1 auto-start flow.
+ */
+function resolveNgrokAuthtoken(): string | null {
+  let authtoken = process.env.NGROK_AUTHTOKEN;
+  if (authtoken) return authtoken;
+
+  const home = process.env.HOME || '';
+  const ngrokEnvPath = path.join(home, '.gstack', 'ngrok.env');
+  if (fs.existsSync(ngrokEnvPath)) {
+    try {
+      const envContent = fs.readFileSync(ngrokEnvPath, 'utf-8');
+      const match = envContent.match(/^NGROK_AUTHTOKEN=(.+)$/m);
+      if (match) return match[1].trim();
+    } catch {}
+  }
+
+  const ngrokConfigs = [
+    path.join(home, 'Library', 'Application Support', 'ngrok', 'ngrok.yml'),
+    path.join(home, '.config', 'ngrok', 'ngrok.yml'),
+    path.join(home, '.ngrok2', 'ngrok.yml'),
+  ];
+  for (const conf of ngrokConfigs) {
+    try {
+      const content = fs.readFileSync(conf, 'utf-8');
+      const match = content.match(/authtoken:\s*(.+)/);
+      if (match) return match[1].trim();
+    } catch {}
+  }
+  return null;
+}
+
+/**
+ * Tear down the tunnel: close the ngrok listener and stop the tunnel-surface
+ * Bun.serve listener.  Safe to call with nothing running.  Always clears
+ * tunnel state regardless of individual close failures.
+ */
+async function closeTunnel(): Promise<void> {
+  try { if (tunnelListener) await tunnelListener.close(); } catch {}
+  try { if (tunnelServer) tunnelServer.stop(true); } catch {}
+  tunnelListener = null;
+  tunnelServer = null;
+  tunnelUrl = null;
+  tunnelActive = false;
+}
 
 function validateAuth(req: Request): boolean {
   const header = req.headers.get('authorization');
@@ -1407,11 +1500,53 @@ async function start() {
   }
 
   const startTime = Date.now();
-  const server = Bun.serve({
-    port,
-    hostname: '127.0.0.1',
-    fetch: async (req) => {
-      const url = new URL(req.url);
+
+  // ─── Request handler factory ────────────────────────────────────
+  //
+  // Same logic serves both the local listener (bootstrap, CLI, sidebar) and
+  // the tunnel listener (pairing + scoped-token commands).  The factory
+  // closes over `surface` so the filter that runs before route dispatch
+  // knows which socket accepted the request.
+  //
+  // On the tunnel surface: reject anything not in TUNNEL_PATHS (404), reject
+  // root-token bearers (403), and require a scoped token for everything
+  // except /connect.  Denials are logged to ~/.gstack/security/attempts.jsonl.
+  const makeFetchHandler = (surface: Surface) => async (req: Request): Promise<Response> => {
+    const url = new URL(req.url);
+
+    // ─── Tunnel surface filter (runs before any route dispatch) ──
+    if (surface === 'tunnel') {
+      const isGetConnect = req.method === 'GET' && url.pathname === '/connect';
+      const allowed = TUNNEL_PATHS.has(url.pathname);
+      if (!allowed && !isGetConnect) {
+        logTunnelDenial(req, url, 'path_not_on_tunnel');
+        return new Response(JSON.stringify({ error: 'Not found' }), {
+          status: 404, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (isRootRequest(req)) {
+        logTunnelDenial(req, url, 'root_token_on_tunnel');
+        return new Response(JSON.stringify({
+          error: 'Root token rejected on tunnel surface',
+          hint: 'Remote agents must pair via /connect to receive a scoped token.',
+        }), { status: 403, headers: { 'Content-Type': 'application/json' } });
+      }
+      if (url.pathname !== '/connect' && !getTokenInfo(req)) {
+        logTunnelDenial(req, url, 'missing_scoped_token');
+        return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+          status: 401, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+    }
+
+    // GET /connect — alive probe.  Unauth on both surfaces.  Used by /pair
+    // and /tunnel/start to detect dead ngrok tunnels via the tunnel URL,
+    // since /health is not tunnel-reachable under the dual-listener design.
+    if (url.pathname === '/connect' && req.method === 'GET') {
+      return new Response(JSON.stringify({ alive: true }), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
+    }
 
       // Cookie picker routes — HTML page unauthenticated, data/action routes require auth
       if (url.pathname.startsWith('/cookie-picker')) {
@@ -1614,11 +1749,14 @@ async function start() {
             domains: pairBody.domains,
             rateLimit: pairBody.rateLimit,
           });
-          // Verify tunnel is actually alive before reporting it (ngrok may have died externally)
+          // Verify tunnel is actually alive before reporting it (ngrok may have died externally).
+          // Probe via GET /connect — under dual-listener /health is NOT on the tunnel allowlist,
+          // so the old probe would return 404 and always mark the tunnel as dead.
           let verifiedTunnelUrl: string | null = null;
           if (tunnelActive && tunnelUrl) {
             try {
-              const probe = await fetch(`${tunnelUrl}/health`, {
+              const probe = await fetch(`${tunnelUrl}/connect`, {
+                method: 'GET',
                 headers: { 'ngrok-skip-browser-warning': 'true' },
                 signal: AbortSignal.timeout(5000),
               });
@@ -1626,15 +1764,11 @@ async function start() {
                 verifiedTunnelUrl = tunnelUrl;
               } else {
                 console.warn(`[browse] Tunnel probe failed (HTTP ${probe.status}), marking tunnel as dead`);
-                tunnelActive = false;
-                tunnelUrl = null;
-                tunnelListener = null;
+                await closeTunnel();
               }
             } catch {
               console.warn('[browse] Tunnel probe timed out or unreachable, marking tunnel as dead');
-              tunnelActive = false;
-              tunnelUrl = null;
-              tunnelListener = null;
+              await closeTunnel();
             }
           }
           return new Response(JSON.stringify({
@@ -1652,16 +1786,29 @@ async function start() {
       }
 
       // ─── /tunnel/start — start ngrok tunnel on demand (root-only) ──
+      //
+      // Dual-listener model: binds a SECOND Bun.serve listener on an
+      // ephemeral 127.0.0.1 port dedicated to tunnel traffic, then points
+      // ngrok.forward() at THAT port.  The existing local listener (which
+      // serves /health+token, /cookie-picker, /inspector/*, welcome, etc.)
+      // is never exposed to ngrok.
+      //
+      // Hard fail if the tunnel listener bind fails — NEVER fall back to
+      // the local port, which would silently defeat the whole security
+      // property.
       if (url.pathname === '/tunnel/start' && req.method === 'POST') {
         if (!isRootRequest(req)) {
           return new Response(JSON.stringify({ error: 'Root token required' }), {
             status: 403, headers: { 'Content-Type': 'application/json' },
           });
         }
-        if (tunnelActive && tunnelUrl) {
-          // Verify tunnel is still alive before returning cached URL
+        if (tunnelActive && tunnelUrl && tunnelServer) {
+          // Verify tunnel is still alive before returning cached URL.
+          // Probe GET /connect (the only unauth-reachable path on the tunnel
+          // surface); /health is NOT tunnel-reachable under dual-listener.
           try {
-            const probe = await fetch(`${tunnelUrl}/health`, {
+            const probe = await fetch(`${tunnelUrl}/connect`, {
+              method: 'GET',
               headers: { 'ngrok-skip-browser-warning': 'true' },
               signal: AbortSignal.timeout(5000),
             });
@@ -1671,53 +1818,49 @@ async function start() {
               });
             }
           } catch {}
-          // Tunnel is dead, reset and fall through to restart
+          // Tunnel is dead — tear down cleanly before restarting
           console.warn('[browse] Cached tunnel is dead, restarting...');
-          tunnelActive = false;
-          tunnelUrl = null;
-          tunnelListener = null;
+          await closeTunnel();
         }
+
+        // 1) Resolve ngrok authtoken from env / .gstack / native config
+        const authtoken = resolveNgrokAuthtoken();
+        if (!authtoken) {
+          return new Response(JSON.stringify({
+            error: 'No ngrok authtoken found',
+            hint: 'Run: ngrok config add-authtoken YOUR_TOKEN',
+          }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+        }
+
+        // 2) Bind the tunnel listener on an ephemeral port.  HARD FAIL if
+        //    this errors — never fall back to the local port.
+        let boundTunnel: ReturnType<typeof Bun.serve>;
         try {
-          // Read ngrok authtoken: env var > ~/.gstack/ngrok.env > ngrok native config
-          let authtoken = process.env.NGROK_AUTHTOKEN;
-          if (!authtoken) {
-            const ngrokEnvPath = path.join(process.env.HOME || '', '.gstack', 'ngrok.env');
-            if (fs.existsSync(ngrokEnvPath)) {
-              const envContent = fs.readFileSync(ngrokEnvPath, 'utf-8');
-              const match = envContent.match(/^NGROK_AUTHTOKEN=(.+)$/m);
-              if (match) authtoken = match[1].trim();
-            }
-          }
-          if (!authtoken) {
-            // Check ngrok's native config files
-            const ngrokConfigs = [
-              path.join(process.env.HOME || '', 'Library', 'Application Support', 'ngrok', 'ngrok.yml'),
-              path.join(process.env.HOME || '', '.config', 'ngrok', 'ngrok.yml'),
-              path.join(process.env.HOME || '', '.ngrok2', 'ngrok.yml'),
-            ];
-            for (const conf of ngrokConfigs) {
-              try {
-                const content = fs.readFileSync(conf, 'utf-8');
-                const match = content.match(/authtoken:\s*(.+)/);
-                if (match) { authtoken = match[1].trim(); break; }
-              } catch {}
-            }
-          }
-          if (!authtoken) {
-            return new Response(JSON.stringify({
-              error: 'No ngrok authtoken found',
-              hint: 'Run: ngrok config add-authtoken YOUR_TOKEN',
-            }), { status: 400, headers: { 'Content-Type': 'application/json' } });
-          }
+          boundTunnel = Bun.serve({
+            port: 0,
+            hostname: '127.0.0.1',
+            fetch: makeFetchHandler('tunnel'),
+          });
+        } catch (err: any) {
+          return new Response(JSON.stringify({
+            error: `Failed to bind tunnel listener: ${err.message}`,
+          }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+        }
+        const tunnelPort = boundTunnel.port;
+
+        // 3) Point ngrok at the TUNNEL port (not the local port).  If this
+        //    fails, tear the listener back down so we don't leak sockets.
+        try {
           const ngrok = await import('@ngrok/ngrok');
           const domain = process.env.NGROK_DOMAIN;
-          const forwardOpts: any = { addr: server!.port, authtoken };
+          const forwardOpts: any = { addr: tunnelPort, authtoken };
           if (domain) forwardOpts.domain = domain;
 
           tunnelListener = await ngrok.forward(forwardOpts);
           tunnelUrl = tunnelListener.url();
+          tunnelServer = boundTunnel;
           tunnelActive = true;
-          console.log(`[browse] Tunnel started on demand: ${tunnelUrl}`);
+          console.log(`[browse] Tunnel listener bound on 127.0.0.1:${tunnelPort}, ngrok → ${tunnelUrl}`);
 
           // Update state file
           const stateContent = JSON.parse(fs.readFileSync(config.stateFile, 'utf-8'));
@@ -1730,8 +1873,9 @@ async function start() {
             status: 200, headers: { 'Content-Type': 'application/json' },
           });
         } catch (err: any) {
+          try { boundTunnel.stop(true); } catch {}
           return new Response(JSON.stringify({
-            error: `Failed to start tunnel: ${err.message}`,
+            error: `Failed to open ngrok tunnel: ${err.message}`,
           }), { status: 500, headers: { 'Content-Type': 'application/json' } });
         }
       }
@@ -2272,7 +2416,20 @@ async function start() {
           });
         }
         resetIdleTimer();
-        const body = await req.json();
+        const body = await req.json() as any;
+        // Tunnel surface: only commands in TUNNEL_COMMANDS are allowed.
+        // Paired remote agents drive the browser but cannot configure the
+        // daemon, launch new browsers, import cookies, or rotate tokens.
+        if (surface === 'tunnel') {
+          const cmd = canonicalizeCommand(body?.command);
+          if (!cmd || !TUNNEL_COMMANDS.has(cmd)) {
+            logTunnelDenial(req, url, `disallowed_command:${body?.command}`);
+            return new Response(JSON.stringify({
+              error: `Command '${body?.command}' is not allowed over the tunnel surface`,
+              hint: `Tunnel commands: ${[...TUNNEL_COMMANDS].sort().join(', ')}`,
+            }), { status: 403, headers: { 'Content-Type': 'application/json' } });
+          }
+        }
         return handleCommand(body, tokenInfo);
       }
 
@@ -2437,7 +2594,13 @@ async function start() {
       }
 
       return new Response('Not found', { status: 404 });
-    },
+  };
+  // ─── End of makeFetchHandler ────────────────────────────────────
+
+  const server = Bun.serve({
+    port,
+    hostname: '127.0.0.1',
+    fetch: makeFetchHandler('local'),
   });
 
   // Write state file (atomic: write .tmp then rename)
@@ -2497,37 +2660,34 @@ async function start() {
   initSidebarSession();
 
   // ─── Tunnel startup (optional) ────────────────────────────────
-  // Start ngrok tunnel if BROWSE_TUNNEL=1 is set.
-  // Reads NGROK_AUTHTOKEN from env or ~/.gstack/ngrok.env.
-  // Reads NGROK_DOMAIN for dedicated domain (stable URL).
+  // Start ngrok tunnel if BROWSE_TUNNEL=1 is set.  Uses the dual-listener
+  // pattern: bind a dedicated tunnel listener on an ephemeral port and
+  // point ngrok.forward() at IT, not the local daemon port.
   if (process.env.BROWSE_TUNNEL === '1') {
-    try {
-      // Read ngrok authtoken from env or config file
-      let authtoken = process.env.NGROK_AUTHTOKEN;
-      if (!authtoken) {
-        const ngrokEnvPath = path.join(process.env.HOME || '', '.gstack', 'ngrok.env');
-        if (fs.existsSync(ngrokEnvPath)) {
-          const envContent = fs.readFileSync(ngrokEnvPath, 'utf-8');
-          const match = envContent.match(/^NGROK_AUTHTOKEN=(.+)$/m);
-          if (match) authtoken = match[1].trim();
-        }
-      }
-      if (!authtoken) {
-        console.error('[browse] BROWSE_TUNNEL=1 but no NGROK_AUTHTOKEN found. Set it via env var or ~/.gstack/ngrok.env');
-      } else {
+    const authtoken = resolveNgrokAuthtoken();
+    if (!authtoken) {
+      console.error('[browse] BROWSE_TUNNEL=1 but no NGROK_AUTHTOKEN found. Set it via env var or ~/.gstack/ngrok.env');
+    } else {
+      let boundTunnel: ReturnType<typeof Bun.serve> | null = null;
+      try {
+        boundTunnel = Bun.serve({
+          port: 0,
+          hostname: '127.0.0.1',
+          fetch: makeFetchHandler('tunnel'),
+        });
+        const tunnelPort = boundTunnel.port;
+
         const ngrok = await import('@ngrok/ngrok');
         const domain = process.env.NGROK_DOMAIN;
-        const forwardOpts: any = {
-          addr: port,
-          authtoken,
-        };
+        const forwardOpts: any = { addr: tunnelPort, authtoken };
         if (domain) forwardOpts.domain = domain;
 
         tunnelListener = await ngrok.forward(forwardOpts);
         tunnelUrl = tunnelListener.url();
+        tunnelServer = boundTunnel;
         tunnelActive = true;
 
-        console.log(`[browse] Tunnel active: ${tunnelUrl}`);
+        console.log(`[browse] Tunnel listener bound on 127.0.0.1:${tunnelPort}, ngrok → ${tunnelUrl}`);
 
         // Update state file with tunnel URL
         const stateContent = JSON.parse(fs.readFileSync(config.stateFile, 'utf-8'));
@@ -2535,9 +2695,10 @@ async function start() {
         const tmpState = config.stateFile + '.tmp';
         fs.writeFileSync(tmpState, JSON.stringify(stateContent, null, 2), { mode: 0o600 });
         fs.renameSync(tmpState, config.stateFile);
+      } catch (err: any) {
+        console.error(`[browse] Failed to start tunnel: ${err.message}`);
+        try { if (boundTunnel) boundTunnel.stop(true); } catch {}
       }
-    } catch (err: any) {
-      console.error(`[browse] Failed to start tunnel: ${err.message}`);
     }
   }
 }
