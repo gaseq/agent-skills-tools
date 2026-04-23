@@ -1,20 +1,8 @@
 # Changelog
 
-## [1.6.4.0] - 2026-04-22 (in-progress on `garrytan/injection-tuning`)
+## [1.6.4.0] - 2026-04-22
 
-## **Branch resynced with main. Injection-tuning plan approved. No user-facing runtime changes yet.**
-
-Placeholder entry so VERSION 1.6.4.0 has a home. The actual v1.6.4.0 shipping content (real detection recovery from 56.2% → ≥67% via canonicalization, chunking, Haiku prompt sharpening, DeBERTa consent, boundary escalation to Sonnet, Phase 10 tool-result intercept, and full 3,680-case BrowseSafe-Bench) lands when the approved plan at `~/.claude/plans/system-instruction-you-are-working-golden-crystal.md` is implemented. Until then, this entry is a bookmark.
-
-### What's on the branch today
-
-- Two merges bringing the branch up to main's v1.6.3.0 (v1.6.0.0 security wave, v1.6.1.0 Opus 4.7 migration, v1.6.2.0 plan-review RECOMMENDATION fix, v1.6.3.0 Codex ELI10).
-- Prior branch work v1.5.2.0 (Haiku FP cut 44% → 23%, detection 67.3% → 56.2% — the regression that motivated this branch) is retained in its own CHANGELOG entry below.
-- Approved 10-phase plan for injection-tuning v1.5.3.0 scope: Phase -1 bisect the v1.5.2.0 regression, Phase 0 error analysis, Phases 1-8 canonicalization + chunking + Haiku sharpening + split consent (local DeBERTa + remote Sonnet, both default OFF) + threshold calibration + boundary escalation + architectural audit + full 3,680-case measurement, Phase 10 PostToolUse hook intercept (real prevention, not late-kill), Phase 9 CHANGELOG rewrite at ship time.
-
-### What this means for anyone on this branch
-
-Run `bun test browse/test/security*.test.ts` — passes. Detection and FP baseline unchanged at 56.2% / 22.9% on the 500-case smoke. The branch is a stable base to start Phase -1 on. This entry will be replaced by a real release-summary entry at /ship time per the branch-scoped CHANGELOG discipline in `CLAUDE.md`.
+Version bump for branch-ahead discipline. No user-facing changes yet.
 
 ## [1.6.3.0] - 2026-04-23
 

@@ -452,6 +452,22 @@ CHANGELOG.md is **for users**, not contributors. Write it like product release n
 - No jargon: say "every question now tells you which project and branch you're in" not
   "AskUserQuestion format standardized across skill templates via preamble resolver."
 
+**Only document what shipped between main and this change.** Readers do not care how
+we got here. Keep out of the CHANGELOG, always:
+
+- Branch resyncs, merge commits with main, rebase activity.
+- Plan approvals, review outcomes (CEO / eng / design / outside-voice / codex findings),
+  AskUserQuestion decisions, scope negotiations.
+- "Work queued," "plan approved," "in-progress," "will ship later" — the CHANGELOG
+  documents what DID ship, not what MIGHT ship.
+- Version-bump housekeeping when no user-facing work actually landed.
+
+If the diff between the base branch version and this version has no user-facing change
+(only merges, only CHANGELOG edits, only placeholder work), the honest entry is one
+sentence: "Version bump for branch-ahead discipline. No user-facing changes yet." Stop
+there. Do not pad. Do not explain the plan that will ship eventually. Do not narrate
+the branch's history. When real work lands, the entry will replace this at /ship time.
+
 ### Release-summary format (every `## [X.Y.Z]` entry)
 
 Every version entry in `CHANGELOG.md` MUST start with a release-summary section in
