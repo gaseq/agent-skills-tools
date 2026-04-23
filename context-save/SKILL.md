@@ -568,11 +568,13 @@ available]. [Health score if available]." Keep it to 2-3 sentences.
 
 ## AskUserQuestion Format
 
-**ALWAYS follow this structure for every AskUserQuestion call:**
+**ALWAYS follow this structure for every AskUserQuestion call. All four elements are non-skippable. If you find yourself about to skip any of them, stop and back up.**
+
 1. **Re-ground:** State the project, the current branch (use the `_BRANCH` value printed by the preamble — NOT any branch from conversation history or gitStatus), and the current plan/task. (1-2 sentences)
-2. **Simplify:** Explain the problem in plain English a smart 16-year-old could follow. No raw function names, no internal jargon, no implementation details. Use concrete examples and analogies. Say what it DOES, not what it's called.
-3. **Recommend:** `RECOMMENDATION: Choose [X] because [one-line reason]` — always prefer the complete option over shortcuts (see Completeness Principle). Include `Completeness: X/10` for each option. Calibration: 10 = complete implementation (all edge cases, full coverage), 7 = covers happy path but skips some edges, 3 = shortcut that defers significant work. If both options are 8+, pick the higher; if one is ≤5, flag it.
-4. **Options:** Lettered options: `A) ... B) ... C) ...` — when an option involves effort, show both scales: `(human: ~X / CC: ~Y)`
+2. **Simplify (ELI10, ALWAYS):** Explain what's happening in plain English a smart 16-year-old could follow. Concrete examples and analogies, not function names or internal jargon. Say what it DOES, not what it's called. State the stakes: what breaks if we pick wrong. This is NOT optional verbosity and it is NOT preamble — the user is about to make a decision and needs context. Even if you'd normally stay terse, emit the ELI10 paragraph. The user will ask for it anyway; do it the first time.
+3. **Recommend (ALWAYS):** Every question ends with `RECOMMENDATION: Choose [X] because [one-line reason]` on its own line. Never omit it. Never collapse it into the options list. Required for every AskUserQuestion, regardless of whether the options are coverage-differentiated or different-in-kind.
+4. **Score completeness (when meaningful):** When options differ in coverage (e.g. full test coverage vs happy path vs shortcut, complete error handling vs partial), score each with `Completeness: N/10` on its own line. Calibration: 10 = complete (all edge cases, full coverage), 7 = happy path only, 3 = shortcut. Flag any option ≤5 where a higher-completeness option exists. When options differ in kind (picking a review posture, picking an architectural approach, cherry-pick Add/Defer/Skip, choosing between two different kinds of systems), the completeness axis doesn't apply — skip `Completeness: N/10` entirely and write one line: `Note: options differ in kind, not coverage — no completeness score.` Do not fabricate filler scores.
+5. **Options:** Lettered options: `A) ... B) ... C) ...` — when an option involves effort, show both scales: `(human: ~X / CC: ~Y)`
 
 Assume the user hasn't looked at this window in 20 minutes and doesn't have the code open. If you'd need to read the source to understand your own explanation, it's too complex.
 
@@ -692,7 +694,7 @@ AI makes completeness near-free. Always recommend the complete option over short
 | Feature | 1 week | 30 min | ~30x |
 | Bug fix | 4 hours | 15 min | ~20x |
 
-Include `Completeness: X/10` for each option (10=all edge cases, 7=happy path, 3=shortcut).
+When options differ in coverage (e.g. full vs happy-path vs shortcut), include `Completeness: X/10` on each option (10 = all edge cases, 7 = happy path, 3 = shortcut). When options differ in kind (mode posture, architectural choice, cherry-pick A/B/C where each is a different kind of thing, not a more-or-less-complete version of the same thing), skip the score and write one line explaining why: `Note: options differ in kind, not coverage — no completeness score.` Do not fabricate scores.
 
 ## Confusion Protocol
 
@@ -1079,106 +1081,6 @@ Restore later with /context-restore.
 
 ---
 
-<<<<<<< HEAD:checkpoint/SKILL.md.tmpl
-## Resume flow
-
-### Step 1: Find checkpoints
-
-```bash
-eval "$(~/.claude/skills/gstack/bin/gstack-slug 2>/dev/null)" && mkdir -p ~/.gstack/projects/$SLUG
-CHECKPOINT_DIR="$HOME/.gstack/projects/$SLUG/checkpoints"
-if [ -d "$CHECKPOINT_DIR" ]; then
-  find "$CHECKPOINT_DIR" -maxdepth 1 -name "*.md" -type f 2>/dev/null | xargs ls -1t 2>/dev/null | head -20
-else
-  echo "NO_CHECKPOINTS"
-fi
-```
-
-List checkpoints from **all branches** (checkpoint files contain the branch name
-in their frontmatter, so all files in the directory are candidates). This enables
-Conductor workspace handoff — a checkpoint saved on one branch can be resumed from
-another.
-
-### Step 1.5: Check for WIP commit context (continuous checkpoint mode)
-
-If `CHECKPOINT_MODE` was `"continuous"` during prior work, the branch may have
-`WIP:` commits with structured `[gstack-context]` blocks in their bodies. These
-are a second recovery trail alongside the markdown checkpoint files.
-
-```bash
-_BRANCH=$(git branch --show-current 2>/dev/null)
-# Detect if this branch has any WIP commits against the nearest remote ancestor
-_BASE=$(git merge-base HEAD origin/main 2>/dev/null || git merge-base HEAD origin/master 2>/dev/null)
-if [ -n "$_BASE" ]; then
-  WIP_COMMITS=$(git log "$_BASE"..HEAD --grep="^WIP:" --format="%H" 2>/dev/null | head -20)
-  if [ -n "$WIP_COMMITS" ]; then
-    echo "WIP_COMMITS_FOUND"
-    # Extract [gstack-context] blocks from each WIP commit body
-    for SHA in $WIP_COMMITS; do
-      echo "--- commit $SHA ---"
-      git log -1 "$SHA" --format="%s%n%n%b" 2>/dev/null | \
-        awk '/\[gstack-context\]/,/\[\/gstack-context\]/ { print }'
-    done
-  else
-    echo "NO_WIP_COMMITS"
-  fi
-fi
-```
-
-If `WIP_COMMITS_FOUND`: Read the extracted `[gstack-context]` blocks. Each block
-represents a logical unit of prior work with Decisions/Remaining/Tried/Skill.
-Merge these with the markdown checkpoint file to reconstruct session state. The
-git history shows the chronological arc; the markdown checkpoint shows the
-intentional save points. Both matter.
-
-**Important:** Do NOT delete WIP commits during resume. They remain the recovery
-trail until /ship squashes them into clean commits during PR creation.
-
-### Step 2: Load checkpoint
-
-If the user specified a checkpoint (by number, title fragment, or date), find the
-matching file. Otherwise, load the **most recent** checkpoint.
-
-Read the checkpoint file and present a summary:
-
-```
-RESUMING CHECKPOINT
-════════════════════════════════════════
-Title:       {title}
-Branch:      {branch from checkpoint}
-Saved:       {timestamp, human-readable}
-Duration:    Last session was {formatted duration} (if available)
-Status:      {status}
-════════════════════════════════════════
-
-### Summary
-{summary from checkpoint}
-
-### Remaining Work
-{remaining work items from checkpoint}
-
-### Notes
-{notes from checkpoint}
-```
-
-If the current branch differs from the checkpoint's branch, note this:
-"This checkpoint was saved on branch `{branch}`. You are currently on
-`{current branch}`. You may want to switch branches before continuing."
-
-### Step 3: Offer next steps
-
-After presenting the checkpoint, ask via AskUserQuestion:
-
-- A) Continue working on the remaining items
-- B) Show the full checkpoint file
-- C) Just needed the context, thanks
-
-If A, summarize the first remaining work item and suggest starting there.
-
----
-
-=======
->>>>>>> origin/main:context-save/SKILL.md.tmpl
 ## List flow
 
 ### Step 1: Gather saved contexts
