@@ -1,6 +1,6 @@
 # Changelog
 
-## [1.7.0.0] - 2026-04-23
+## [1.10.0.0] - 2026-04-23
 
 ## **Plan reviews walk you through each issue again, and every question is now a real decision brief.**
 
